@@ -61,6 +61,8 @@ if [[ $SKIP_DOCKER_CHECK -eq 0 ]]; then
         sleep 2
         docker system info &>/dev/null && DOCKER_OK=1
       fi
+    fi
+  fi
   fi
 else
   log "--skip-docker-check active — skipping Docker validation."
