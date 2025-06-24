@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------
-# Local-LLM-SaaS zero‑cost installer  •  v2025‑06‑25‑b
+# Local-LLM-SaaS zero‑cost installer  •  v2025‑06‑25‑c
 #--------------------------------------------------------------------
 #  Tested on:
 #   • Ubuntu 22.04 / Fedora 40
@@ -41,22 +41,22 @@ done
 
 #──────────────────── Dynamic Docker detection ────────────
 
-# Attempt to determine if Docker and the daemon are *already* usable.
-# 1. CLI present and daemon responding -> good.
-# 2. CLI present but daemon off      -> try starting Desktop (macOS) or service (Linux).
-# 3. CLI absent                      -> will install later.
 DOCKER_OK=0
 if need docker; then
   if docker system info &>/dev/null; then
-    DOCKER_OK=1
+    DOCKER_OK=1               # CLI & daemon good
   else
-    # CLI exists but daemon not responding
+    # macOS: if CLI present, prefer launching existing Docker Desktop instead of reinstalling via brew
     if [[ "$OS" == darwin* && -d "/Applications/Docker.app" ]]; then
-      log "Docker Desktop found but not running — launching it…"
+      log "Docker CLI found but daemon not running — starting Docker Desktop…"
       open -g -a Docker || true
       SECS=0
       until docker system info &>/dev/null || [[ $SECS -gt 60 ]]; do sleep 2; SECS=$((SECS+2)); done
-      [[ $SECS -le 60 ]] && DOCKER_OK=1
+      if docker system info &>/dev/null; then
+        DOCKER_OK=1
+      else
+        err "Docker Desktop didn't start within 60 s. Please open it manually, then re‑run with --skip-docker-check"
+      fi
     elif [[ "$OS" == linux* ]]; then
       sudo systemctl start docker || true
       sleep 3
@@ -70,24 +70,16 @@ if [[ $SKIP_DOCKER_CHECK -eq 1 ]]; then
   DOCKER_OK=1
 fi
 
-#──────────────────── Docker install (if needed) ──────────
+#──────────────────── Docker install (only if CLI missing) ─
 remove_stale_docker_links() {
-  # Homebrew aborts if stale or broken links remain from an old Docker Desktop.
-  local links=(
-    /usr/local/bin/kubectl.docker
-    /usr/local/bin/docker
-    /usr/local/bin/docker-compose
-    /usr/local/bin/compose
-    /usr/local/bin/docker-compose-v1
-    /usr/local/bin/docker-compose.docker
-  )
-  for l in "${links[@]}"; do
-    if [[ -e "$l" || -L "$l" ]]; then sudo rm -f "$l" || true; fi
+  # Remove any symlink or binary that can break brew cask.
+  for l in /usr/local/bin/docker* /usr/local/bin/kubectl.docker /usr/local/bin/compose*; do
+    [[ -e "$l" || -L "$l" ]] && sudo rm -f "$l" 2>/dev/null || true
   done
 }
 
 install_docker() {
-  log "Installing Docker Engine + Compose…"
+  log "Installing Docker Engine + Compose (no CLI detected)…"
   if [[ "$OS" == linux* ]]; then
     if need apt-get; then
       sudo apt-get update
@@ -106,41 +98,28 @@ install_docker() {
     sudo systemctl enable --now docker
     sudo usermod -aG docker "$USER" || true
   elif [[ "$OS" == darwin* ]]; then
-    # ensure Homebrew
     if ! need brew; then
       log "Installing Homebrew…"
       /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
       eval "$($(brew --prefix)/bin/brew shellenv)"
     fi
 
-    # remove stale symlinks that break brew cask install
     remove_stale_docker_links
-
-    if brew list --cask docker-desktop &>/dev/null; then
-      log "Docker Desktop already present — upgrading…"
-      if ! brew upgrade --cask docker-desktop; then
-        log "brew upgrade failed, attempting reinstall…"
-        brew uninstall --cask docker-desktop || true
-        remove_stale_docker_links
-        brew install --cask docker-desktop
-      fi
-    else
-      brew install --cask docker-desktop
-    fi
-
-    # Ensure Docker Desktop is running so CLI works
+    brew install --cask docker-desktop
     open -g -a Docker || true
+    log "Waiting for Docker Desktop to start (max 60 s)…"
     SECS=0
-    log "Waiting for Docker Desktop to start (max 60 s)…"
     until docker system info &>/dev/null || [[ $SECS -gt 60 ]]; do sleep 3; SECS=$((SECS+3)); done
-    [[ $SECS -gt 60 ]] && err "Docker failed to start — open it manually, then run with --skip-docker-check"
+    [[ $SECS -gt 60 ]] && err "Docker failed to start after installation."
+  else
+    err "Unsupported OS for automatic Docker install."
   fi
 }
 
 if [[ $DOCKER_OK -eq 0 ]]; then
   install_docker
 else
-  log "Docker daemon is running — skipping installation."
+  log "Docker daemon is running — installation skipped."
 fi
 
 #──────────────────── Generate docker-compose.yml ─────────
@@ -181,7 +160,7 @@ docker compose pull --quiet
 docker compose up -d
 
 #──────────────────── Wait for WebUI health ───────────────
-printf "⌛ Waiting for WebUI ″; until curl -fs http://localhost:${NATIVE_PORT_UI}/health &>/dev/null; do printf "."; sleep 2; done; echo " ready."
+printf "⌛ Waiting for WebUI "; until curl -fs http://localhost:${NATIVE_PORT_UI}/health &>/dev/null; do printf "."; sleep 2; done; echo " ready."
 
 #──────────────────── Electron desktop wrapper ───────────
 build_app() {
@@ -201,4 +180,13 @@ build_app() {
 
   case "$OS" in
     darwin*)
-      sudo mv "$TMP_DIR"/*.app "/Applications/${APP
+      sudo mv "$TMP_DIR"/*.app "/Applications/${APP_NAME}.app"
+      log "Desktop app installed to /Applications."
+      ;;
+    linux*)
+      chmod +x "$TMP_DIR"/*.AppImage
+      sudo mv "$TMP_DIR"/*.AppImage "/usr/local/bin/${APP_NAME// /-}.AppImage"
+      log "AppImage placed in /usr/local/bin."
+      ;;
+    *) # Windows Git-Bash / MSYS
+      EX
