@@ -42,30 +42,35 @@ done
 #──────────────────── Dynamic Docker detection ────────────
 
 DOCKER_OK=0
-if [[ $SKIP_DOCKER_CHECK -eq 0 ]]; then
-  # 1️⃣ If CLI present + daemon active → good
+
+if [[ $SKIP_DOCKER_CHECK -eq 1 ]]; then
+  log "--skip-docker-check active — skipping Docker validation."
+  DOCKER_OK=1
+else
+  # Quick path: CLI + daemon already responding
   if need docker && docker system info &>/dev/null; then
     DOCKER_OK=1
   else
-    # 2️⃣ macOS: try launching existing Docker.app even if CLI missing
-    if [[ "$OS" == darwin* && -d "/Applications/Docker.app" ]]; then
-      log "Attempting to start existing Docker Desktop…"
-      open -g -a Docker || true
-      SECS=0
-      until need docker && docker system info &>/dev/null || [[ $SECS -gt 90 ]]; do sleep 3; SECS=$((SECS+3)); done
-      [[ $SECS -le 90 ]] && DOCKER_OK=1
-    # 3️⃣ Linux: service may be installed but stopped
-    elif [[ "$OS" == linux* ]]; then
-      if need docker; then
-        sudo systemctl start docker || true
-        sleep 2
-        docker system info &>/dev/null && DOCKER_OK=1
-      fi
-    fi
+    case "$OS" in
+      darwin*)
+        if [[ -d "/Applications/Docker.app" ]]; then
+          log "Attempting to start existing Docker Desktop…"
+          open -g -a Docker || true
+          for _ in {1..30}; do
+            sleep 3
+            if need docker && docker system info &>/dev/null; then DOCKER_OK=1; break; fi
+          done
+        fi
+        ;;
+      linux*)
+        if need docker; then
+          sudo systemctl start docker || true
+          sleep 3
+          docker system info &>/dev/null && DOCKER_OK=1
+        fi
+        ;;
+    esac
   fi
-else
-  log "--skip-docker-check active — skipping Docker validation."
-  DOCKER_OK=1
 fi
 
 #──────────────────── Docker install (only if still bad) ──
