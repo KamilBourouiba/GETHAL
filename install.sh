@@ -1,27 +1,27 @@
 #!/usr/bin/env bash
 #--------------------------------------------------------------------
-# Local‑LLM‑SaaS zero‑cost installer  •  v2025‑06‑24
+# Local-LLM-SaaS zero‑cost installer  •  v2025‑06‑25‑b
 #--------------------------------------------------------------------
 #  Tested on:
 #   • Ubuntu 22.04 / Fedora 40
 #   • macOS 14 (Intel & Apple‑Silicon)
-#   • Windows 10/11 (Git‑Bash or WSL2 + Docker Desktop)
+#   • Windows 10/11 (Git‑Bash or WSL2 + Docker Desktop)
 #--------------------------------------------------------------------
 set -euo pipefail
 
 APP_NAME="Local LLM Chat"
 MODEL="llama3:8b"                 # default Ollama model
 NATIVE_PORT_UI=3000
-INTERNAL_PORT_UI=8080             # Open WebUI default
+INTERNAL_PORT_UI=8080             # Open WebUI default
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
 
-#───────────────────────── helper ─────────────────────────
+#───────────────────────── helpers ─────────────────────────
 need() { command -v "$1" >/dev/null 2>&1; }
 log()  { printf "\e[1;34m▶ %s\e[0m\n" "$*"; }
 err()  { printf "\e[31m❌ %s\e[0m\n" "$*" >&2; exit 1; }
 
-#───────────────────────── arg‑parse ──────────────────────
+#───────────────────────── arg‑parse ───────────────────────
 SKIP_DOCKER_CHECK=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,9 +39,40 @@ EOF
   esac
 done
 
-#──────────────────── Docker install (Linux/macOS) ───────
+#──────────────────── Dynamic Docker detection ────────────
+
+# Attempt to determine if Docker and the daemon are *already* usable.
+# 1. CLI present and daemon responding -> good.
+# 2. CLI present but daemon off      -> try starting Desktop (macOS) or service (Linux).
+# 3. CLI absent                      -> will install later.
+DOCKER_OK=0
+if need docker; then
+  if docker system info &>/dev/null; then
+    DOCKER_OK=1
+  else
+    # CLI exists but daemon not responding
+    if [[ "$OS" == darwin* && -d "/Applications/Docker.app" ]]; then
+      log "Docker Desktop found but not running — launching it…"
+      open -g -a Docker || true
+      SECS=0
+      until docker system info &>/dev/null || [[ $SECS -gt 60 ]]; do sleep 2; SECS=$((SECS+2)); done
+      [[ $SECS -le 60 ]] && DOCKER_OK=1
+    elif [[ "$OS" == linux* ]]; then
+      sudo systemctl start docker || true
+      sleep 3
+      docker system info &>/dev/null && DOCKER_OK=1
+    fi
+  fi
+fi
+
+if [[ $SKIP_DOCKER_CHECK -eq 1 ]]; then
+  log "--skip-docker-check active — skipping Docker validation."
+  DOCKER_OK=1
+fi
+
+#──────────────────── Docker install (if needed) ──────────
 remove_stale_docker_links() {
-  # Homebrew aborts if stale links remain from older Docker Desktop.
+  # Homebrew aborts if stale or broken links remain from an old Docker Desktop.
   local links=(
     /usr/local/bin/kubectl.docker
     /usr/local/bin/docker
@@ -51,12 +82,12 @@ remove_stale_docker_links() {
     /usr/local/bin/docker-compose.docker
   )
   for l in "${links[@]}"; do
-    [[ -e "$l" ]] && sudo rm -f "$l"
+    if [[ -e "$l" || -L "$l" ]]; then sudo rm -f "$l" || true; fi
   done
 }
 
 install_docker() {
-  log "Installing Docker Engine + Compose…"
+  log "Installing Docker Engine + Compose…"
   if [[ "$OS" == linux* ]]; then
     if need apt-get; then
       sudo apt-get update
@@ -74,7 +105,6 @@ install_docker() {
     fi
     sudo systemctl enable --now docker
     sudo usermod -aG docker "$USER" || true
-
   elif [[ "$OS" == darwin* ]]; then
     # ensure Homebrew
     if ! need brew; then
@@ -87,7 +117,7 @@ install_docker() {
     remove_stale_docker_links
 
     if brew list --cask docker-desktop &>/dev/null; then
-      log "Docker Desktop already present — upgrading…"
+      log "Docker Desktop already present — upgrading…"
       if ! brew upgrade --cask docker-desktop; then
         log "brew upgrade failed, attempting reinstall…"
         brew uninstall --cask docker-desktop || true
@@ -100,19 +130,17 @@ install_docker() {
 
     # Ensure Docker Desktop is running so CLI works
     open -g -a Docker || true
-    log "Waiting for Docker Desktop to launch (max 60 s)…"
     SECS=0
+    log "Waiting for Docker Desktop to start (max 60 s)…"
     until docker system info &>/dev/null || [[ $SECS -gt 60 ]]; do sleep 3; SECS=$((SECS+3)); done
-    [[ $SECS -gt 60 ]] && err "Docker Desktop failed to start — please open it once and re‑run with --skip-docker-check"
+    [[ $SECS -gt 60 ]] && err "Docker failed to start — open it manually, then run with --skip-docker-check"
   fi
 }
 
-if [[ $SKIP_DOCKER_CHECK -eq 0 ]]; then
-  if ! need docker || ! docker compose version &>/dev/null; then
-    install_docker
-  else
-    log "Docker & Compose detected — skipping install."
-  fi
+if [[ $DOCKER_OK -eq 0 ]]; then
+  install_docker
+else
+  log "Docker daemon is running — skipping installation."
 fi
 
 #──────────────────── Generate docker-compose.yml ─────────
@@ -148,19 +176,18 @@ volumes:
 YAML
 
 #──────────────────── Boot the stack ─────────────────────
-log "Booting local‑LLM stack (first run pulls ≈8 GB)…"
+log "Booting local‑LLM stack (first run pulls ≈8 GB)…"
 docker compose pull --quiet
 docker compose up -d
 
 #──────────────────── Wait for WebUI health ───────────────
-printf "⌛ Waiting for WebUI to be healthy… "
-until curl -fs http://localhost:${NATIVE_PORT_UI}/health &>/dev/null; do printf "."; sleep 2; done; echo " ready."
+printf "⌛ Waiting for WebUI ″; until curl -fs http://localhost:${NATIVE_PORT_UI}/health &>/dev/null; do printf "."; sleep 2; done; echo " ready."
 
 #──────────────────── Electron desktop wrapper ───────────
 build_app() {
   log "Bundling Electron desktop app…"
   if ! need node || [[ $(node -v | cut -d. -f1 | tr -d v) -lt 18 ]]; then
-    log "Installing Node LTS…"
+    log "Installing Node LTS…"
     if [[ "$OS" == darwin* ]]; then brew install node@20;
     elif [[ "$OS" == linux* ]]; then curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash - && sudo apt-get install -y nodejs; fi
   fi
@@ -174,40 +201,4 @@ build_app() {
 
   case "$OS" in
     darwin*)
-      sudo mv "$TMP_DIR"/*.app "/Applications/${APP_NAME}.app"
-      log "Desktop app installed to /Applications."
-      ;;
-    linux*)
-      chmod +x "$TMP_DIR"/*.AppImage
-      sudo mv "$TMP_DIR"/*.AppImage "/usr/local/bin/${APP_NAME// /-}.AppImage"
-      log "AppImage placed in /usr/local/bin."
-      ;;
-    *) # Windows Git‑Bash / MSYS
-      EXE=$(find "$TMP_DIR" -name '*.exe' | head -n1)
-      INSTALL_DIR="/c/Program Files/${APP_NAME}"
-      mkdir -p "$INSTALL_DIR"
-      mv "$(dirname "$EXE")"/* "$INSTALL_DIR"
-      powershell.exe -NoProfile -Command "\
-        $s=(New-Object -ComObject WScript.Shell).CreateShortcut('%PUBLIC%\\Desktop\\${APP_NAME}.lnk');\
-        $s.TargetPath='${INSTALL_DIR//\//\\}\\$(basename "$EXE")';\
-        $s.Save()" 2>/dev/null
-      log "Windows shortcut created on Public Desktop."
-      ;;
-  esac
-}
-
-build_app
-
-#──────────────────── Pre‑pull model ─────────────────────
-log "Pulling model '$MODEL' (first time only)…"
-ollama pull "$MODEL"
-
-cat <<EOF
-
-🎉  All set!
-
-➡  Launch the "$APP_NAME" desktop icon (or visit http://localhost:${NATIVE_PORT_UI}).
-
-   Need another model?   ollama pull <model‑name>
-   Stop the stack?       docker compose down
-EOF
+      sudo mv "$TMP_DIR"/*.app "/Applications/${APP
