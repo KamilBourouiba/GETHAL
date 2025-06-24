@@ -63,7 +63,6 @@ if [[ $SKIP_DOCKER_CHECK -eq 0 ]]; then
       fi
     fi
   fi
-  fi
 else
   log "--skip-docker-check active — skipping Docker validation."
   DOCKER_OK=1
