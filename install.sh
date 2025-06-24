@@ -55,11 +55,12 @@ if [[ $SKIP_DOCKER_CHECK -eq 0 ]]; then
       until need docker && docker system info &>/dev/null || [[ $SECS -gt 90 ]]; do sleep 3; SECS=$((SECS+3)); done
       [[ $SECS -le 90 ]] && DOCKER_OK=1
     # 3️⃣ Linux: service may be installed but stopped
-    elif [[ "$OS" == linux* ]] && need docker; then
-      sudo systemctl start docker || true
-      sleep 2
-      docker system info &>/dev/null && DOCKER_OK=1
-    fi
+    elif [[ "$OS" == linux* ]]; then
+      if need docker; then
+        sudo systemctl start docker || true
+        sleep 2
+        docker system info &>/dev/null && DOCKER_OK=1
+      fi
   fi
 else
   log "--skip-docker-check active — skipping Docker validation."
